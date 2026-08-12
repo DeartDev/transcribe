@@ -1,11 +1,11 @@
 # Transcriptor local con Faster-Whisper y Docker
 
-Herramienta CLI pequeña para transcribir audios locales con **Faster-Whisper large-v3** dentro de Docker. No instala Python, FFmpeg, CUDA ni paquetes pip en Fedora; Fedora solo aporta Docker.
+Herramienta CLI pequeña para transcribir audios locales con **Faster-Whisper large-v3** dentro de Docker. El host solo necesita **Linux + Docker**; no instala Python, FFmpeg, CUDA ni paquetes pip en el sistema operativo.
 
 ## Arquitectura
 
 ```text
-Fedora 44 -> Docker -> contenedor efímero
+Linux host -> Docker -> contenedor efímero
                          Python 3.12 + Faster-Whisper + CTranslate2
 
 audios/ (RO) -> /input -> transcripción CPU/int8 -> /output -> resultados/ (RW)
@@ -19,9 +19,10 @@ Hay dos servicios Compose sobre la misma imagen:
 
 ## Requisitos
 
-- Fedora con Docker Engine y Docker Compose ya instalados.
+- Host Linux con Docker Engine y Docker Compose ya instalados.
 - Usuario con acceso al daemon Docker (`docker info` debe funcionar sin `sudo`).
-- Arquitectura esperada: `x86_64`.
+- Arquitectura esperada/probada: `x86_64`.
+- Fedora fue el entorno de referencia inicial, pero no es un requisito exclusivo.
 - Espacio suficiente para `large-v3` y RAM suficiente para CPU/int8.
 
 ## Instalación
