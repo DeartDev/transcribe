@@ -1,0 +1,38 @@
+name: transcripcion
+
+x-common-hardening: &common-hardening
+  image: transcripcion-local-whisper:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  user: "${TRANSCRIPTOR_UID:-10001}:${TRANSCRIPTOR_GID:-10001}"
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,noexec,size=2g
+  environment:
+    PYTHONDONTWRITEBYTECODE: "1"
+    PYTHONUNBUFFERED: "1"
+    HOME: /tmp/home
+    XDG_CACHE_HOME: /tmp/cache
+    HF_HOME: /models/.cache/huggingface
+    HF_HUB_DISABLE_TELEMETRY: "1"
+    HF_HUB_DISABLE_PROGRESS_BARS: "1"
+  volumes:
+    - ./audios:/input:ro,Z
+    - ./resultados:/output:rw,Z
+    - ./data/models:/models:rw,Z
+
+services:
+  transcriber:
+    <<: *common-hardening
+    network_mode: none
+    command: ["/app/src/transcribir.py", "--help"]
+
+  model-downloader:
+    <<: *common-hardening
+    network_mode: bridge
+    command: ["/app/src/download_model.py", "--help"]

@@ -1,0 +1,1669 @@
+# Proyecto: Transcriptor local de audio con Faster-Whisper aislado mediante Docker
+
+Quiero que desarrolles un proyecto pequeño, autocontenido, reproducible y seguro para realizar transcripciones locales de archivos de audio utilizando **Faster-Whisper** dentro de Docker.
+
+El proyecto será utilizado inicialmente para un caso aislado, pero debe quedar correctamente diseñado y documentado para poder reutilizarse posteriormente sin modificar el sistema operativo host.
+
+## 1. Contexto del entorno
+
+El host es:
+
+* Fedora 44.
+* Docker ya se encuentra instalado y funcionando.
+* El host se mantiene deliberadamente limpio.
+* Python del host NO debe utilizarse para ejecutar Faster-Whisper.
+* No deben instalarse paquetes RPM, Python, FFmpeg, CUDA, pip, bibliotecas ni dependencias adicionales en Fedora.
+* Todos los componentes necesarios para la transcripción deben permanecer encapsulados dentro de Docker o dentro del directorio controlado del proyecto.
+* No se utilizará GPU inicialmente.
+* La ejecución debe realizarse mediante CPU.
+* Arquitectura esperada: `x86_64`.
+
+Python instalado actualmente en el host:
+
+```text
+Python 3.14.6
+```
+
+Este Python **no debe modificarse, reemplazarse ni utilizarse como dependencia del proyecto**.
+
+---
+
+# 2. Objetivo
+
+Construir una herramienta CLI basada en:
+
+* Docker
+* Docker Compose
+* Python 3.12 dentro del contenedor
+* Faster-Whisper
+* modelo Whisper `large-v3`
+
+que permita ejecutar algo conceptualmente equivalente a:
+
+```bash
+./transcribir.sh ./audios/audio.mp3
+```
+
+y obtenga como salida una transcripción fiel al audio.
+
+Ejemplo:
+
+```text
+./resultados/audio.txt
+```
+
+Opcionalmente también deberá poder producir:
+
+```text
+./resultados/audio.srt
+./resultados/audio.vtt
+```
+
+La aplicación NO es un servidor web.
+
+NO requiere HTTP.
+
+NO requiere API.
+
+NO requiere base de datos.
+
+NO requiere ningún puerto TCP o UDP.
+
+Su arquitectura debe permanecer deliberadamente simple.
+
+---
+
+# 3. Principio fundamental: proteger el host
+
+El proyecto debe aplicar el principio:
+
+> Todo lo necesario para Faster-Whisper pertenece al contenedor; Fedora solamente proporciona Docker.
+
+Está explícitamente prohibido que el proceso de instalación ejecute comandos como:
+
+```bash
+sudo dnf install ...
+pip install ...
+pip3 install ...
+python -m pip install ...
+```
+
+sobre el host.
+
+También está prohibido:
+
+* modificar `/usr`
+* modificar `/usr/local`
+* modificar `/etc`
+* modificar `$HOME/.local`
+* modificar el Python del sistema
+* modificar configuraciones de shell
+* instalar FFmpeg en Fedora
+* instalar CUDA en Fedora
+* instalar CTranslate2 en Fedora
+* crear virtualenvs Python en Fedora
+* crear servicios systemd
+* modificar firewall
+* modificar SELinux
+* desactivar SELinux
+* agregar repositorios RPM
+* modificar Docker daemon
+* abrir puertos
+
+Si alguna dependencia es requerida, debe instalarse exclusivamente dentro de la imagen Docker.
+
+---
+
+# 4. Seguridad de red
+
+Este requisito es obligatorio.
+
+## 4.1 No publicar puertos
+
+El proyecto NO puede utilizar:
+
+```yaml
+ports:
+```
+
+bajo ninguna circunstancia.
+
+Tampoco debe utilizar:
+
+```text
+-p
+--publish
+-P
+--publish-all
+```
+
+en ningún script.
+
+No quiero puertos expuestos como:
+
+```text
+0.0.0.0:XXXX
+127.0.0.1:XXXX
+[::]:XXXX
+```
+
+Ni siquiera se debe publicar un puerto únicamente en localhost.
+
+La aplicación no necesita escuchar conexiones entrantes.
+
+## 4.2 `EXPOSE`
+
+No agregar instrucciones:
+
+```dockerfile
+EXPOSE
+```
+
+al Dockerfile salvo que exista una justificación técnica real, que en principio no existe para este proyecto.
+
+## 4.3 Red durante ejecución
+
+Analiza cuidadosamente el ciclo de vida del modelo.
+
+Faster-Whisper puede necesitar acceso a Internet para obtener inicialmente el modelo.
+
+Diseña una estrategia donde:
+
+1. la descarga inicial del modelo esté controlada;
+2. el modelo quede persistido únicamente dentro de una carpeta del proyecto o volumen específicamente definido;
+3. una vez disponible el modelo, la transcripción normal pueda realizarse sin necesidad de Internet cuando técnicamente sea posible.
+
+Evalúa si resulta apropiado ejecutar la fase de transcripción con:
+
+```yaml
+network_mode: none
+```
+
+o su equivalente.
+
+NO lo apliques ciegamente si impediría el funcionamiento inicial.
+
+Documenta claramente:
+
+* cuándo necesita red;
+* por qué;
+* cuándo deja de necesitarla;
+* cómo verificar que el procesamiento habitual funciona sin red.
+
+La arquitectura preferida es:
+
+```text
+Internet
+   │
+   │ solo cuando sea necesario descargar dependencias/modelo
+   ▼
+Docker
+   │
+   ├── Faster-Whisper
+   ├── CTranslate2
+   ├── PyAV
+   └── modelo large-v3
+
+Transcripción normal
+   │
+   X Internet
+   X puertos
+   X servidor
+```
+
+---
+
+# 5. Seguridad del contenedor
+
+Aplicar hardening razonable sin romper innecesariamente Faster-Whisper.
+
+Como mínimo, evaluar e implementar cuando sean compatibles:
+
+```yaml
+security_opt:
+  - no-new-privileges:true
+```
+
+Eliminar capabilities Linux innecesarias:
+
+```yaml
+cap_drop:
+  - ALL
+```
+
+El contenedor debe ejecutarse como usuario **no-root** durante runtime.
+
+Crear un usuario dedicado dentro de la imagen, por ejemplo:
+
+```text
+app
+```
+
+con UID/GID explícitos o con una estrategia que evite generar archivos propiedad de root en el host.
+
+No usar:
+
+```yaml
+privileged: true
+```
+
+No montar:
+
+```text
+/var/run/docker.sock
+```
+
+No utilizar:
+
+```yaml
+network_mode: host
+```
+
+No utilizar:
+
+```yaml
+pid: host
+ipc: host
+uts: host
+```
+
+No agregar dispositivos del host.
+
+No agregar capabilities salvo que exista una justificación técnica estrictamente necesaria.
+
+No usar `sudo` dentro del contenedor.
+
+---
+
+# 6. Sistema de archivos del contenedor
+
+Analiza si el root filesystem puede ejecutarse como:
+
+```yaml
+read_only: true
+```
+
+Si Faster-Whisper necesita áreas temporales de escritura, utilizar preferentemente:
+
+```yaml
+tmpfs:
+```
+
+por ejemplo para:
+
+```text
+/tmp
+```
+
+No desactivar `read_only` simplemente por comodidad.
+
+Distinguir claramente entre:
+
+### Entrada
+
+```text
+./audios
+```
+
+Debe montarse preferiblemente:
+
+```text
+read-only
+```
+
+El contenedor NO debe modificar los audios originales.
+
+### Salida
+
+```text
+./resultados
+```
+
+Debe ser el único directorio persistente de escritura requerido para los resultados.
+
+### Modelo/cache
+
+```text
+./modelos
+```
+
+o una estructura equivalente.
+
+Debe quedar completamente controlada por el proyecto.
+
+No utilizar silenciosamente:
+
+```text
+~/.cache
+~/.cache/huggingface
+```
+
+del usuario Fedora.
+
+NO montar `$HOME` completo.
+
+NO montar `/`.
+
+NO montar directorios innecesarios del host.
+
+---
+
+# 7. Persistencia del modelo
+
+El modelo `large-v3` ocupa una cantidad significativa de almacenamiento.
+
+Debe existir una decisión explícita sobre cómo administrarlo.
+
+Preferiblemente:
+
+```text
+proyecto/
+└── data/
+    └── models/
+```
+
+o una estructura equivalente.
+
+Configurar las variables necesarias, por ejemplo las relacionadas con Hugging Face, para evitar que el modelo termine guardándose fuera del proyecto.
+
+La ubicación debe ser:
+
+* conocida;
+* documentada;
+* eliminable;
+* reproducible.
+
+El script de desinstalación debe permitir eliminar este modelo.
+
+---
+
+# 8. Dockerfile
+
+Utilizar una imagen oficial y suficientemente pequeña basada en:
+
+```dockerfile
+python:3.12-slim
+```
+
+o una versión específica compatible mejor justificada.
+
+Evitar:
+
+```dockerfile
+FROM python:latest
+```
+
+Considerar fijar una versión suficientemente concreta para mejorar reproducibilidad.
+
+Seguir buenas prácticas:
+
+* minimizar capas innecesarias;
+* instalar únicamente paquetes indispensables;
+* usar `--no-install-recommends` si se necesita `apt`;
+* eliminar `/var/lib/apt/lists/*`;
+* utilizar `pip --no-cache-dir`;
+* no incluir herramientas de depuración innecesarias;
+* no incluir editores;
+* no incluir SSH;
+* no incluir systemd;
+* no incluir curl/wget salvo necesidad real de build;
+* no dejar gestores o archivos temporales innecesarios.
+
+Analizar si FFmpeg realmente debe instalarse.
+
+Faster-Whisper utiliza PyAV para decodificación, por lo que no asumir automáticamente que debe instalarse el ejecutable FFmpeg.
+
+Mantener la imagen lo más pequeña posible dentro de las necesidades reales del modelo.
+
+---
+
+# 9. Dependencias Python
+
+Definir explícitamente las dependencias.
+
+Utilizar uno de estos mecanismos:
+
+```text
+requirements.txt
+```
+
+o preferiblemente versiones fijadas apropiadamente.
+
+No utilizar indiscriminadamente:
+
+```text
+pip install --upgrade *
+```
+
+La compilación debe ser reproducible.
+
+Documentar:
+
+* versión de Python;
+* versión de faster-whisper;
+* versión relevante de CTranslate2;
+* dependencias críticas.
+
+---
+
+# 10. Script Python de transcripción
+
+Crear:
+
+```text
+src/transcribir.py
+```
+
+Debe aceptar como mínimo:
+
+```bash
+python transcribir.py /input/audio.mp3
+```
+
+Opcionalmente:
+
+```bash
+python transcribir.py /input/audio.mp3 \
+    --language es \
+    --model large-v3 \
+    --format txt
+```
+
+Debe utilizar:
+
+```python
+device="cpu"
+compute_type="int8"
+```
+
+como configuración inicial.
+
+Debe utilizar idioma español:
+
+```python
+language="es"
+```
+
+para este caso.
+
+Configurar apropiadamente:
+
+```python
+beam_size=5
+vad_filter=True
+condition_on_previous_text=True
+```
+
+si son adecuados para obtener una transcripción fiel.
+
+No resumir.
+
+No reinterpretar.
+
+No corregir lo expresado por los interlocutores.
+
+El objetivo es producir una transcripción lo más literal posible.
+
+---
+
+# 11. Timestamps
+
+El TXT debe incluir marcas de tiempo.
+
+Formato preferido:
+
+```text
+[00:00:04 - 00:00:09] Buenos días, ¿cómo está?
+[00:00:10 - 00:00:14] Muy bien, gracias.
+```
+
+Debe conservarse:
+
+* texto original;
+* repeticiones;
+* muletillas cuando Whisper pueda reconocerlas;
+* expresiones coloquiales.
+
+No aplicar corrección estilística.
+
+---
+
+# 12. Formatos de salida
+
+Soportar inicialmente:
+
+```text
+txt
+```
+
+y, si no introduce complejidad innecesaria:
+
+```text
+srt
+vtt
+```
+
+Ejemplo:
+
+```bash
+./transcribir.sh audio.mp3
+```
+
+Resultado:
+
+```text
+resultados/audio.txt
+```
+
+Opcional:
+
+```bash
+./transcribir.sh audio.mp3 --format srt
+```
+
+---
+
+# 13. Manejo de nombres de archivos
+
+El sistema debe aceptar:
+
+* espacios;
+* acentos;
+* caracteres Unicode razonables;
+* nombres largos.
+
+No construir comandos inseguros mediante concatenación de strings.
+
+Usar correctamente quoting en Bash.
+
+---
+
+# 14. Recursos
+
+La máquina utilizará CPU.
+
+No imponer límites tan restrictivos que impidan ejecutar `large-v3`, pero documentar aproximadamente los requisitos observados.
+
+Docker Compose puede incluir límites razonables solo después de analizar qué necesita realmente Faster-Whisper.
+
+No configurar valores arbitrarios.
+
+---
+
+# 15. Docker Compose
+
+Crear:
+
+```text
+compose.yaml
+```
+
+Preferir el nombre moderno:
+
+```text
+compose.yaml
+```
+
+sobre:
+
+```text
+docker-compose.yml
+```
+
+No utilizar el atributo obsoleto:
+
+```yaml
+version:
+```
+
+El servicio puede llamarse:
+
+```text
+transcriber
+```
+
+Debe cumplir:
+
+```text
+ports: AUSENTE
+privileged: AUSENTE
+Docker socket: AUSENTE
+host networking: AUSENTE
+cap_drop: ALL
+no-new-privileges: habilitado
+usuario no-root: habilitado
+```
+
+Los volúmenes deben limitarse estrictamente a:
+
+```text
+input
+output
+model/cache
+```
+
+según sea necesario.
+
+---
+
+# 16. Ejecución efímera
+
+El contenedor debe ser efímero.
+
+Preferir:
+
+```bash
+docker compose run --rm ...
+```
+
+en lugar de mantener servicios permanentemente ejecutándose.
+
+Después de una transcripción:
+
+```bash
+docker ps
+```
+
+no debería mostrar ningún contenedor de este proyecto ejecutándose.
+
+No utilizar:
+
+```bash
+docker compose up -d
+```
+
+si no existe una razón técnica.
+
+Este proyecto es una herramienta CLI, no un daemon.
+
+---
+
+# 17. Script principal
+
+Crear:
+
+```text
+transcribir.sh
+```
+
+Debe permitir:
+
+```bash
+./transcribir.sh ./audios/archivo.mp3
+```
+
+El script debe:
+
+1. validar que Docker exista;
+2. validar que Docker esté funcionando;
+3. validar que exista el archivo;
+4. resolver correctamente su ruta;
+5. asegurarse de que únicamente el archivo/directorio requerido sea accesible;
+6. ejecutar el contenedor;
+7. retirar automáticamente el contenedor al finalizar;
+8. informar dónde quedó la transcripción;
+9. devolver códigos de salida correctos;
+10. manejar errores de manera explícita.
+
+Debe utilizar:
+
+```bash
+set -Eeuo pipefail
+```
+
+si resulta apropiado.
+
+No usar `sudo docker`.
+
+Si Docker necesita sudo, informar el problema en lugar de intentar modificar el host.
+
+---
+
+# 18. Script de instalación
+
+Al finalizar el proyecto crear obligatoriamente:
+
+```text
+install.sh
+```
+
+Debe realizar una instalación limpia.
+
+IMPORTANTE:
+
+`install.sh` NO debe instalar Docker.
+
+Debe asumir que Docker ya está instalado.
+
+Debe limitarse a:
+
+* verificar requisitos;
+* crear directorios requeridos;
+* establecer permisos;
+* construir la imagen;
+* realizar validaciones;
+* opcionalmente descargar/preparar el modelo;
+* mostrar instrucciones de uso.
+
+Debe ser:
+
+* idempotente;
+* seguro;
+* comprensible;
+* comentado;
+* abortar ante errores.
+
+Debe soportar:
+
+```bash
+./install.sh
+```
+
+No debe requerir:
+
+```bash
+sudo
+```
+
+bajo condiciones normales.
+
+---
+
+# 19. Desinstalación limpia
+
+Crear obligatoriamente:
+
+```text
+uninstall.sh
+```
+
+El objetivo es devolver el host al estado anterior al proyecto tanto como sea razonablemente posible.
+
+Debe identificar y poder eliminar exclusivamente recursos pertenecientes a este proyecto:
+
+* containers;
+* imagen Docker;
+* redes Docker creadas por Compose;
+* volúmenes Docker si existieran;
+* modelo descargado;
+* caché del proyecto;
+* archivos temporales;
+* directorios generados.
+
+NO ejecutar comandos destructivos globales como:
+
+```bash
+docker system prune -a
+docker volume prune
+docker network prune
+docker builder prune -a
+```
+
+porque podrían afectar otros proyectos.
+
+NO eliminar imágenes o redes que no pertenezcan explícitamente a este proyecto.
+
+Antes de eliminar:
+
+```text
+resultados/
+```
+
+debe preguntar o preservarlos por defecto.
+
+Los audios originales tampoco deben eliminarse automáticamente.
+
+Debe ofrecer opciones claras, por ejemplo:
+
+```text
+1. Eliminar contenedores e imagen
+2. Eliminar además modelo/cache
+3. Limpieza completa del proyecto
+```
+
+o flags equivalentes.
+
+---
+
+# 20. Script de diagnóstico
+
+Crear:
+
+```text
+scripts/verify-security.sh
+```
+
+Debe comprobar automáticamente que se cumplan los requisitos críticos.
+
+Como mínimo:
+
+## Puertos
+
+Verificar:
+
+```bash
+docker compose config
+```
+
+y comprobar que no exista publicación de puertos.
+
+Después de ejecutar:
+
+```bash
+docker ps
+```
+
+no debe aparecer:
+
+```text
+0.0.0.0:
+127.0.0.1:
+[::]:
+```
+
+asociado al proyecto.
+
+También comprobar durante la ejecución mediante:
+
+```bash
+docker inspect
+```
+
+que:
+
+```text
+HostConfig.PortBindings
+```
+
+esté vacío.
+
+## Privilegios
+
+Comprobar mediante `docker inspect`:
+
+```text
+Privileged = false
+```
+
+## Capabilities
+
+Verificar que:
+
+```text
+CapDrop
+```
+
+incluya:
+
+```text
+ALL
+```
+
+## Usuario
+
+Verificar que el proceso no se ejecute como root.
+
+Ejemplo conceptual:
+
+```bash
+id
+```
+
+desde el contenedor.
+
+UID no debe ser:
+
+```text
+0
+```
+
+## No-new-privileges
+
+Verificar:
+
+```text
+SecurityOpt
+```
+
+y comprobar:
+
+```text
+no-new-privileges
+```
+
+## Docker socket
+
+Comprobar que:
+
+```text
+/var/run/docker.sock
+```
+
+NO esté montado.
+
+## Filesystem
+
+Verificar los mounts efectivos y comprobar que no exista acceso innecesario al host.
+
+---
+
+# 21. Verificación de red
+
+Crear una prueba explícita.
+
+Durante procesamiento offline, si el modelo ya está descargado:
+
+```bash
+docker compose run --rm ...
+```
+
+debe poder ejecutarse sin publicación de puertos.
+
+Si se implementa:
+
+```text
+network_mode: none
+```
+
+validar mediante inspección que:
+
+```text
+NetworkMode
+```
+
+sea:
+
+```text
+none
+```
+
+durante la transcripción offline.
+
+Documentar cualquier excepción necesaria.
+
+---
+
+# 22. SELinux y Fedora
+
+Fedora utiliza SELinux.
+
+NO recomendar:
+
+```bash
+setenforce 0
+```
+
+NO recomendar deshabilitar SELinux.
+
+Los bind mounts deben diseñarse correctamente para funcionar con SELinux.
+
+Evaluar apropiadamente:
+
+```text
+:z
+```
+
+o:
+
+```text
+:Z
+```
+
+en los bind mounts si es necesario.
+
+Explicar por qué se elige uno.
+
+Como este proyecto no comparte los directorios con otros contenedores ajenos, considerar el etiquetado privado apropiado.
+
+No realizar modificaciones permanentes de políticas SELinux si pueden evitarse.
+
+---
+
+# 23. `.dockerignore`
+
+Crear:
+
+```text
+.dockerignore
+```
+
+Debe impedir que entren accidentalmente al contexto de build:
+
+```text
+.git
+audios
+resultados
+modelos
+cache
+*.mp3
+*.wav
+*.m4a
+*.flac
+.env
+.env.*
+__pycache__
+*.pyc
+```
+
+Agregar cualquier otro contenido apropiado.
+
+Los audios potencialmente sensibles nunca deben copiarse dentro de la imagen.
+
+---
+
+# 24. `.gitignore`
+
+Crear:
+
+```text
+.gitignore
+```
+
+Debe ignorar como mínimo:
+
+```text
+audios/*
+resultados/*
+data/models/*
+cache/*
+.env
+.env.*
+__pycache__/
+```
+
+Mantener archivos `.gitkeep` si se necesitan directorios vacíos.
+
+El modelo Whisper no debe versionarse.
+
+Los audios no deben versionarse.
+
+Las transcripciones tampoco deben versionarse por defecto porque pueden contener información sensible.
+
+---
+
+# 25. Información sensible
+
+Las grabaciones pueden contener:
+
+* nombres;
+* teléfonos;
+* documentos;
+* direcciones;
+* información comercial;
+* información potencialmente sensible.
+
+Por tanto:
+
+* no enviar audios a servicios externos;
+* no utilizar APIs cloud;
+* no agregar telemetría propia;
+* no subir archivos automáticamente;
+* no enviar transcripciones a terceros;
+* no incluir audio dentro de imágenes Docker;
+* no guardar audio en logs;
+* no imprimir información innecesariamente.
+
+La transcripción debe realizarse localmente.
+
+---
+
+# 26. Logging
+
+Los logs deben ser mínimos.
+
+Está permitido mostrar:
+
+```text
+Procesando: archivo.mp3
+Modelo: large-v3
+Dispositivo: CPU
+Salida: resultados/archivo.txt
+```
+
+Evitar imprimir grandes cantidades de contenido sensible cuando no sea necesario.
+
+Permitir opcionalmente:
+
+```text
+--verbose
+```
+
+---
+
+# 27. Documentación obligatoria
+
+Crear:
+
+```text
+README.md
+```
+
+Debe explicar:
+
+1. propósito;
+2. arquitectura;
+3. requisitos;
+4. instalación;
+5. primera descarga del modelo;
+6. uso;
+7. formatos soportados;
+8. directorios;
+9. seguridad;
+10. privacidad;
+11. SELinux;
+12. troubleshooting;
+13. actualización;
+14. desinstalación;
+15. limpieza completa.
+
+---
+
+# 28. Documentación técnica
+
+Crear:
+
+```text
+docs/
+├── arquitectura.md
+├── seguridad.md
+├── instalacion.md
+├── uso.md
+├── troubleshooting.md
+└── desinstalacion.md
+```
+
+## `arquitectura.md`
+
+Explicar:
+
+```text
+Fedora 44
+   │
+   └── Docker Engine
+         │
+         └── Container efímero
+              ├── Python 3.12
+              ├── Faster-Whisper
+              ├── CTranslate2
+              └── large-v3
+```
+
+y flujo:
+
+```text
+audio RO
+   │
+   ▼
+Faster-Whisper
+   │
+   ▼
+resultado RW
+```
+
+## `seguridad.md`
+
+Incluir el threat model básico.
+
+Analizar al menos:
+
+* escape de contenedor;
+* acceso innecesario al host;
+* exposición de red;
+* ejecución root;
+* capabilities;
+* filesystem;
+* audios sensibles;
+* caches;
+* supply chain;
+* dependencias;
+* imágenes base.
+
+Explicar las medidas implementadas.
+
+---
+
+# 29. Documentación de comandos de auditoría
+
+Crear una sección que permita auditar manualmente el proyecto.
+
+Ejemplos:
+
+```bash
+docker compose config
+```
+
+```bash
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+```
+
+```bash
+docker inspect <container>
+```
+
+```bash
+docker image inspect <image>
+```
+
+```bash
+docker compose images
+```
+
+```bash
+docker compose ps
+```
+
+Agregar filtros específicos para comprobar los controles establecidos.
+
+---
+
+# 30. Supply chain
+
+Utilizar exclusivamente imágenes oficiales de Docker cuando sea posible.
+
+Evitar imágenes de terceros desconocidos.
+
+Documentar exactamente:
+
+```text
+FROM ...
+```
+
+Evaluar fijar la imagen por digest:
+
+```dockerfile
+FROM python:3.12-slim@sha256:...
+```
+
+si esto aporta reproducibilidad razonable.
+
+Si se fija digest, documentar cómo actualizarlo.
+
+No descargar scripts arbitrarios mediante:
+
+```bash
+curl ... | bash
+wget ... | sh
+```
+
+durante instalación.
+
+---
+
+# 31. Healthcheck
+
+No agregar `healthcheck` simplemente porque sea habitual.
+
+Este proyecto es una ejecución batch/CLI.
+
+Si no aporta utilidad, omitirlo.
+
+Evitar complejidad ceremonial.
+
+---
+
+# 32. Principio de mínima complejidad
+
+No convertir este proyecto en:
+
+* microservicio;
+* API REST;
+* interfaz web;
+* daemon;
+* servicio permanente;
+* aplicación distribuida.
+
+Es únicamente:
+
+```text
+audio → transcripción
+```
+
+La solución correcta debe ser pequeña.
+
+---
+
+# 33. Estructura esperada
+
+Proponer inicialmente algo cercano a:
+
+```text
+faster-whisper-docker/
+├── compose.yaml
+├── Dockerfile
+├── requirements.txt
+├── .dockerignore
+├── .gitignore
+│
+├── src/
+│   └── transcribir.py
+│
+├── scripts/
+│   ├── verify-security.sh
+│   └── download-model.sh
+│
+├── audios/
+│   └── .gitkeep
+│
+├── resultados/
+│   └── .gitkeep
+│
+├── data/
+│   └── models/
+│       └── .gitkeep
+│
+├── docs/
+│   ├── arquitectura.md
+│   ├── seguridad.md
+│   ├── instalacion.md
+│   ├── uso.md
+│   ├── troubleshooting.md
+│   └── desinstalacion.md
+│
+├── transcribir.sh
+├── install.sh
+├── uninstall.sh
+└── README.md
+```
+
+Puedes modificar esta estructura si encuentras una alternativa técnicamente superior, pero debes justificarlo.
+
+---
+
+# 34. Flujo de instalación esperado
+
+Idealmente:
+
+```bash
+git clone ...
+cd faster-whisper-docker
+./install.sh
+```
+
+La instalación debe terminar mostrando algo como:
+
+```text
+Instalación completada.
+
+Seguridad:
+✓ No se publican puertos
+✓ Container no-root
+✓ Capabilities eliminadas
+✓ no-new-privileges habilitado
+✓ Docker socket no montado
+✓ Audio montado read-only
+✓ SELinux conservado
+✓ Python del host intacto
+
+Uso:
+
+./transcribir.sh ./audios/audio.mp3
+```
+
+No muestres un check positivo si no fue realmente comprobado.
+
+---
+
+# 35. Flujo de uso
+
+Debe ser simple:
+
+```bash
+cp ~/Descargas/audio.mp3 ./audios/
+```
+
+```bash
+./transcribir.sh ./audios/audio.mp3
+```
+
+Resultado:
+
+```text
+./resultados/audio.txt
+```
+
+---
+
+# 36. Flujo de limpieza
+
+Por ejemplo:
+
+```bash
+./uninstall.sh
+```
+
+Debe permitir retirar completamente:
+
+```text
+container
+image
+network
+modelo
+cache
+```
+
+sin tocar recursos de otros proyectos Docker.
+
+---
+
+# 37. Criterios de aceptación
+
+El proyecto NO se considera terminado hasta comprobar todos estos puntos.
+
+## Host
+
+```text
+[ ] No se instaló ningún RPM.
+[ ] No se instaló ningún paquete pip en Fedora.
+[ ] Python 3.14 del host permanece intacto.
+[ ] No se instaló Python 3.12/3.13 en Fedora.
+[ ] No se instaló FFmpeg en Fedora.
+[ ] No se instaló CUDA.
+[ ] No se modificó SELinux.
+[ ] No se modificó firewalld.
+```
+
+## Docker
+
+```text
+[ ] No existe ports: en Compose.
+[ ] No existe EXPOSE innecesario.
+[ ] No hay PortBindings.
+[ ] No utiliza privileged.
+[ ] No utiliza host networking.
+[ ] No monta docker.sock.
+[ ] Ejecuta como non-root.
+[ ] cap_drop ALL está aplicado.
+[ ] no-new-privileges está aplicado.
+[ ] Los mounts se limitan a lo imprescindible.
+[ ] El audio entra read-only.
+[ ] El contenedor es efímero.
+```
+
+## Aplicación
+
+```text
+[ ] Transcribe MP3.
+[ ] Transcribe español.
+[ ] Utiliza large-v3.
+[ ] Funciona mediante CPU.
+[ ] Produce TXT.
+[ ] Produce timestamps.
+[ ] No resume el contenido.
+[ ] La salida persiste fuera del contenedor.
+```
+
+## Limpieza
+
+```text
+[ ] uninstall.sh elimina únicamente recursos del proyecto.
+[ ] Puede eliminar el modelo.
+[ ] Puede eliminar la imagen.
+[ ] No ejecuta prune global.
+[ ] Conserva resultados por defecto.
+```
+
+---
+
+# 38. Auditoría final obligatoria
+
+Antes de considerar terminado el proyecto, ejecutar y documentar las salidas relevantes de:
+
+```bash
+docker compose config
+```
+
+```bash
+docker compose build
+```
+
+```bash
+./scripts/verify-security.sh
+```
+
+Realizar además una transcripción real de prueba.
+
+Después:
+
+```bash
+docker compose ps
+```
+
+debe demostrar que no quedó ningún servicio permanente ejecutándose.
+
+Verificar también mediante `docker inspect` que no existan puertos publicados.
+
+---
+
+# 39. Forma de trabajo
+
+No escribas todo de una vez sin validación.
+
+Trabaja incrementalmente.
+
+Orden requerido:
+
+1. inspeccionar requisitos;
+2. proponer arquitectura;
+3. revisar amenazas y decisiones de seguridad;
+4. crear Dockerfile;
+5. crear Compose;
+6. crear aplicación Python;
+7. crear scripts;
+8. construir imagen;
+9. probar transcripción;
+10. ejecutar auditoría de seguridad;
+11. corregir problemas;
+12. generar documentación;
+13. generar `install.sh`;
+14. generar `uninstall.sh`;
+15. ejecutar validación final.
+
+Antes de agregar una dependencia o debilitar una restricción de seguridad, comprobar primero si realmente es necesaria.
+
+Aplicar el principio:
+
+> Cuando haya varias soluciones, elegir primero la más simple que satisfaga correctamente el requisito.
+
+---
+
+# 40. Regla sobre problemas encontrados
+
+Si alguna medida propuesta anteriormente resulta incompatible con Faster-Whisper:
+
+NO la elimines silenciosamente.
+
+Debes indicar:
+
+```text
+Control:
+Problema encontrado:
+Causa:
+Riesgo:
+Alternativas:
+Solución seleccionada:
+Justificación:
+```
+
+Por ejemplo, si `read_only: true` produce un problema, identifica exactamente qué ruta intenta escribir Faster-Whisper antes de desactivar el filesystem read-only.
+
+Preferir montar únicamente esa ruta como `tmpfs` o volumen antes de conceder escritura global.
+
+---
+
+# 41. Entregables finales
+
+El proyecto solo puede marcarse como terminado si entrega:
+
+```text
+[ ] Dockerfile
+[ ] compose.yaml
+[ ] requirements.txt
+[ ] src/transcribir.py
+[ ] transcribir.sh
+[ ] install.sh
+[ ] uninstall.sh
+[ ] scripts/verify-security.sh
+[ ] .dockerignore
+[ ] .gitignore
+[ ] README.md
+[ ] docs/arquitectura.md
+[ ] docs/seguridad.md
+[ ] docs/instalacion.md
+[ ] docs/uso.md
+[ ] docs/troubleshooting.md
+[ ] docs/desinstalacion.md
+```
+
+y existe evidencia de que:
+
+```text
+[ ] el build funciona;
+[ ] la transcripción funciona;
+[ ] el modelo persiste donde se espera;
+[ ] la ejecución offline funciona si técnicamente corresponde;
+[ ] no existen puertos publicados;
+[ ] el proceso no ejecuta como root;
+[ ] los controles Docker fueron inspeccionados;
+[ ] la desinstalación no afecta otros proyectos;
+[ ] Fedora permanece limpio.
+```
+
+## Objetivo final
+
+La solución final debe conseguir:
+
+```text
+                 ┌──────────────────────────┐
+ audio.mp3 ──RO─►│ Container efímero        │
+                 │                          │
+                 │ Python 3.12              │
+                 │ Faster-Whisper           │
+                 │ large-v3                 │
+                 │ CPU / int8               │
+                 │                          │
+                 │ non-root                 │
+                 │ cap_drop ALL             │
+                 │ no-new-privileges        │
+                 │ sin puertos              │
+                 │ sin Docker socket        │
+                 │ aislamiento de red       │
+                 └────────────┬─────────────┘
+                              │
+                              │ RW
+                              ▼
+                       transcripcion.txt
+
+Fedora 44:
+  ├── Docker existente
+  └── ninguna dependencia adicional
+```
+
+Prioriza en este orden:
+
+1. integridad del host;
+2. privacidad del audio;
+3. seguridad del contenedor;
+4. fidelidad de transcripción;
+5. reproducibilidad;
+6. facilidad de instalación/desinstalación;
+7. simplicidad.

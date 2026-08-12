@@ -1,0 +1,26 @@
+# Datos sensibles / generados
+audios/*
+!audios/.gitkeep
+resultados/*
+!resultados/.gitkeep
+data/models/*
+!data/models/.gitkeep
+cache/*
+!cache/.gitkeep
+modelos/
+
+# Secretos
+.env
+.env.*
+
+# Python / herramientas
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temporales
+*.tmp
+*.log
+.DS_Store
